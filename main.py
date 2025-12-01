@@ -4,80 +4,77 @@ import json
 from tqdm import tqdm
 
 
-def top_k_questions(k=5):
+def top_k_questions(params, k=5):
     API_URL = "https://api.stackexchange.com/2.3/questions"
-
-    params = {
-        "tagged": "python",
-        "sort": "votes",
-        "order": "desc",
-        "site": "stackoverflow",
-        "pagesize": 1,  # максимум за раз
-    }
-
     all_questions = []
 
-    for page in tqdm(range(1, k+1)):
-        params["page"] = page
+    with tqdm(total=k*params["pagesize"]) as pbar:
+      for page in range(1, k+1):
+          params["page"] = (page - 1) * params["pagesize"] + 1
 
-        res = requests.get(API_URL, params=params, timeout=10)
-        data = res.json()
+          res = requests.get(API_URL,
+                            params=params,
+                            timeout=10)
+          data = res.json()
+          items = data.get("items", [])
 
-        items = data.get("items", [])
+          if not items:
+              break
 
-        if not items:
-            break
-
-        all_questions.extend(items)
-        time.sleep(0.15)
+          all_questions.extend(items)
+          time.sleep(0.15)
+          pbar.update(params["pagesize"])
 
     return all_questions
 
-def get_answers(questions):
-    ids = ';'.join([str(question['question_id']) for question in questions])
-    url = f"https://api.stackexchange.com/2.3/questions/{ids}/answers"
+def get_answers(question):
+  qid = question['question_id']
+  url = f"https://api.stackexchange.com/2.3/questions/{qid}/answers"
+  params = {"site": "stackoverflow", "filter": "withbody"}
 
+  res = requests.get(url, params=params, timeout=10)
+  print(res)
+  res = res.json().get('items', [])
+  time.sleep(2.5)
+
+  if res:
+      chosen = res[0]
+      rejected = res[-1]
+
+      if chosen["score"] / 2 >= rejected["score"]:
+
+        chosen = md(chosen["body"], heading_style="ATX")
+        rejected = md(rejected["body"], heading_style="ATX")
+        prompt = md(question["body"], heading_style="ATX")
+
+        return {
+                'prompt': prompt,
+                'chosen': chosen,
+                'rejected': rejected}
+  return
+
+if __name__ == '__main__':
     params = {
+        "tagged": ["python"],
         "sort": "votes",
         "order": "desc",
         "site": "stackoverflow",
-        "filter": "!nNPvSNdWme",
+        "filter": "withbody",
+        "pagesize": 10,  # максимум за раз
+        "key": ""
     }
+    
 
-    res = requests.get(url, params=params, timeout=10)
-    data = res.json()
-
-    return data
-
-if __name__ == '__main__':
-    max_questions = 500
     batch_size = 10
     dataset = []
-
-    questions = top_k_questions(k=max_questions)
-
-    for i in tqdm(range(0, max_questions, batch_size)):
-        batch = questions[i:i+batch_size]
-
-        answers = None
-        for j in range(10):
-            try:
-                answers = get_answers(batch)['items']
-                break
-            except Exception as e:
-                print(e)
-                time.sleep(0.5)
-        if answers is None:
-            continue
-
-        for question in batch:
-            id = question['question_id']
-            answers_list = list(filter(lambda answer: answer.get('question_id') == id, answers))
-
-            data_part = {'content':  question['title'],
-                         'chosen': answers_list[0]['body'],
-                         'rejected': answers_list[-1]['body']}
-            dataset.append(data_part)
+    
+    questions = top_k_questions(k=100)
+    
+    dataset = []
+    for question in tqdm(questions):
+        dpo_data = get_answers(question)
+        if dpo_data:
+            dataset.append(dpo_data)
 
     with open("so_python_questions_top.json", "w", encoding="utf-8") as f:
         json.dump(dataset, f, ensure_ascii=False, indent=2)
