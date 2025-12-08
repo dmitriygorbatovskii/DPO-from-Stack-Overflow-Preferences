@@ -3,6 +3,10 @@ from tqdm import tqdm
 from markdownify import markdownify as md
 from collections import defaultdict
 from lxml import etree
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 
 # ['Id', 'PostTypeId', 'AcceptedAnswerId', 'CreationDate', 'Score', 'ViewCount', 'Body',
 # 'OwnerUserId', 'OwnerDisplayName', 'LastEditorUserId', 'LastEditorDisplayName', 'LastEditDate',
@@ -12,9 +16,9 @@ from lxml import etree
 # 'LastEditorDisplayName', 'LastEditDate', 'LastActivityDate', 'CommentCount', 'CommunityOwnedDate', 'ContentLicense']
 
 
-ROWS_EACH_CAT = 50_000
+ROWS_EACH_CAT = 500
 MIN_SCORE = 0
-MIN_ANSWERS = 3
+MIN_ANSWERS = 5
 
 def safe_int(val, default=0):
     try:
@@ -27,7 +31,8 @@ def get_questions(xml_path, questions):
     context = iter(context)
 
     print('\nCollecting questions:')
-    rel_tags = ('c++', 'c#', 'python', 'java', 'javascript', 'php', 'sql')
+    # rel_tags = ('c++', 'c#', 'python', 'java', 'javascript', 'php', 'sql')
+    rel_tags = 'python',
     pbars = [tqdm(desc=tag.ljust(12),
                   position=i,
                   disable=False,
@@ -42,11 +47,8 @@ def get_questions(xml_path, questions):
                     continue
                 if safe_int(attrs.get('Score')) < MIN_SCORE:
                     continue
-                accepted_id = attrs.get('AcceptedAnswerId')
-                if not accepted_id  or accepted_id in ('0', '-1'):
-                    continue
 
-                tags = attrs.get('Tags', '').split('|')
+                tags = attrs.get('Tags', '').split('|')[1:-1]
                 idx = [i for i, tag in enumerate(rel_tags) if tag in tags]
 
                 if len(idx) == 1:
@@ -59,7 +61,6 @@ def get_questions(xml_path, questions):
                         'Body': attrs.get('Body', ''),
                         'Title': attrs.get('Title', ''),
                         'Tags': tags,
-                        'AcceptedAnswerId': accepted_id
                     }
 
             elem.clear()
@@ -92,8 +93,12 @@ def get_answers(xml_path, questions, answers):
 
             score = safe_int(attrs.get('Score'))
 
-            if attrs.get('Id') == questions[parent_id]['AcceptedAnswerId']:
-                answers[parent_id]['Accepted'] = attrs.get('Body', '')
+            if score > answers[parent_id]['BestScore']:
+                answers[parent_id]['SecondScore'] = answers[parent_id]['BestScore']
+                answers[parent_id]['Second'] = answers[parent_id]['Best']
+
+                answers[parent_id]['BestScore'] = score
+                answers[parent_id]['Best'] = attrs.get('Body', '')
 
             elif score > answers[parent_id]['SecondScore']:
                 answers[parent_id]['SecondScore'] = score
@@ -109,7 +114,6 @@ def get_answers(xml_path, questions, answers):
 
 def writer(output_path, questions, answers):
     """
-    Prompt
     Chosen
     Rejected
     Title
@@ -119,33 +123,55 @@ def writer(output_path, questions, answers):
     print(f'\nWriting into {output_path}')
 
     with open(output_path, 'w', encoding='utf-8') as f:
+        dataset = {
+            'chosen': [],
+            'rejected': [],
+            'title': [],
+            'tags': []
+        }
+
         for id, data in tqdm(questions.items(), desc='Writing'):
 
+
             try:
-                if not answers[id]['Accepted'].strip() or not answers[id]['Second'].strip():
+                if not answers[id]['Best'].strip() or not answers[id]['Second'].strip():
                     continue
 
-                part = {
-                    'Prompt': md(data['Body'], heading_style="ATX"),
-                    'Chosen': md(answers[id]['Accepted'], heading_style="ATX"),
-                    'Rejected': md(answers[id]['Second'], heading_style="ATX"),
-                    'Title': data['Title'],
-                    'Tags': data['Tags']
-                }
-                f.write(json.dumps(part, ensure_ascii=False) + '\n')
+                prompt = md(data["Body"], heading_style="ATX")
+
+                dataset["chosen"].append([
+                    {"content": prompt,
+                     "role": "user"},
+                    {"content": md(answers[id]['Best'], heading_style="ATX"),
+                     "role": "assistant"}
+                ])
+
+                dataset["rejected"].append([
+                    {"content": prompt,
+                     "role": "user"},
+                    {"content": md(answers[id]['Second'], heading_style="ATX"),
+                     "role": "assistant"}
+                ])
+
+                dataset['title'].append(data['Title'])
+                dataset['tags'].append(data['Tags'])
 
             except Exception as e:
                 print(f'Exception during writing: {e}')
+
+        df = pd.DataFrame(dataset)
+        df.to_parquet(output_path, engine="pyarrow")
 
         print(f"\nSuccessfully saved into {output_path}")
         print(f"Total rows: {len(questions)}")
 
 if __name__ == '__main__':
-    xml_path = 'data/Posts.xml'
-    output_path = 'data/dataset.json'
+    xml_path = '../data/Posts.xml'
+    output_path = 'dataset.parquet'
 
-    questions = defaultdict(lambda: {'Body': '', 'Title': '', 'Tags': [], 'AcceptedAnswerId': ''})
-    answers = defaultdict(lambda: {'SecondScore': float('-inf'), 'Second': '', 'Accepted': ''})
+    questions = defaultdict(lambda: {'Body': '', 'Title': '', 'Tags': []})
+    answers = defaultdict(lambda: {'SecondScore': float('-inf'), 'Second': '',
+                                   'BestScore': float('-inf'), 'Best': '',})
 
     questions = get_questions(xml_path, questions)
     print(len(questions.keys()))
